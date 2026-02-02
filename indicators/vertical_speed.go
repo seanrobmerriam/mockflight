@@ -1,4 +1,4 @@
-package sensors
+package main
 
 import (
 	"encoding/json"
@@ -29,14 +29,14 @@ const (
 )
 
 type VerticalSpeedIndicator struct {
-	currentVS     float64
-	targetVS      float64
-	phase         FlightPhase
-	phaseTime     time.Duration
-	updateRate    time.Duration
-	noiseLevel    float64
-	format        string
-	lagFactor     float64 // VSI has mechanical lag in real instruments
+	currentVS  float64
+	targetVS   float64
+	phase      FlightPhase
+	phaseTime  time.Duration
+	updateRate time.Duration
+	noiseLevel float64
+	format     string
+	lagFactor  float64 // VSI has mechanical lag in real instruments
 }
 
 func NewVSI(hz float64, format string, noiseLevel float64) *VerticalSpeedIndicator {
@@ -66,7 +66,7 @@ func (v *VerticalSpeedIndicator) updatePhase(elapsed time.Duration) {
 	case Takeoff:
 		// Initial rotation and climb
 		progress := math.Min(1.0, float64(v.phaseTime)/float64(15*time.Second))
-		v.targetVS = progress * 1200.0 // Build up to 1200 fpm climb
+		v.targetVS = progress * 6.1 // Build up to 6.1 m/s climb (~1200 fpm)
 		if v.phaseTime > 15*time.Second {
 			v.phase = Climb
 			v.phaseTime = 0
@@ -74,8 +74,8 @@ func (v *VerticalSpeedIndicator) updatePhase(elapsed time.Duration) {
 
 	case Climb:
 		// Steady climb with slight variations
-		baseVS := 1000.0
-		variation := math.Sin(float64(v.phaseTime)/float64(10*time.Second)) * 100.0
+		baseVS := 5.1 // ~1000 fpm
+		variation := math.Sin(float64(v.phaseTime)/float64(10*time.Second)) * 0.5
 		v.targetVS = baseVS + variation
 		if v.phaseTime > 45*time.Second {
 			v.phase = Cruise
@@ -84,7 +84,7 @@ func (v *VerticalSpeedIndicator) updatePhase(elapsed time.Duration) {
 
 	case Cruise:
 		// Small variations due to turbulence and altitude corrections
-		variation := math.Sin(float64(v.phaseTime)/float64(20*time.Second)) * 50.0
+		variation := math.Sin(float64(v.phaseTime)/float64(20*time.Second)) * 0.25
 		v.targetVS = variation
 		if v.phaseTime > 90*time.Second {
 			v.phase = Descent
@@ -93,8 +93,8 @@ func (v *VerticalSpeedIndicator) updatePhase(elapsed time.Duration) {
 
 	case Descent:
 		// Controlled descent
-		baseVS := -800.0
-		variation := math.Sin(float64(v.phaseTime)/float64(12*time.Second)) * 100.0
+		baseVS := -4.1 // ~-800 fpm
+		variation := math.Sin(float64(v.phaseTime)/float64(12*time.Second)) * 0.5
 		v.targetVS = baseVS + variation
 		if v.phaseTime > 40*time.Second {
 			v.phase = Landing
@@ -106,13 +106,13 @@ func (v *VerticalSpeedIndicator) updatePhase(elapsed time.Duration) {
 		progress := float64(v.phaseTime) / float64(20*time.Second)
 		if progress < 0.7 {
 			// Steady descent on approach
-			v.targetVS = -500.0
+			v.targetVS = -2.5 // ~-500 fpm
 		} else {
 			// Flare - reduce descent rate
 			flareProgress := (progress - 0.7) / 0.3
-			v.targetVS = -500.0 + flareProgress*500.0
+			v.targetVS = -2.5 + flareProgress*2.5
 		}
-		
+
 		if v.phaseTime > 20*time.Second {
 			v.phase = OnGround
 			v.phaseTime = 0
@@ -138,18 +138,18 @@ func (v *VerticalSpeedIndicator) updateVS(dt float64) {
 	v.currentVS += noise
 
 	// Add slight oscillation common in VSI instruments
-	oscillation := math.Sin(float64(time.Now().UnixNano())/1e9*10) * 10.0
+	oscillation := math.Sin(float64(time.Now().UnixNano())/1e9*10) * 0.05
 	v.currentVS += oscillation
 }
 
 func (v *VerticalSpeedIndicator) getReading() VSIReading {
-	// Round to nearest 10 fpm (typical VSI resolution)
-	rounded := math.Round(v.currentVS/10.0) * 10.0
-	
+	// Round to nearest 0.1 m/s
+	rounded := math.Round(v.currentVS*10.0) / 10.0
+
 	return VSIReading{
 		Sensor:    "vertical_speed",
 		Value:     rounded,
-		Unit:      "fpm",
+		Unit:      "m/s",
 		Timestamp: time.Now(),
 	}
 }
@@ -160,7 +160,7 @@ func (v *VerticalSpeedIndicator) outputReading(reading VSIReading) {
 		data, _ := json.Marshal(reading)
 		fmt.Println(string(data))
 	case "csv":
-		fmt.Printf("%s,%.0f,%s,%s\n",
+		fmt.Printf("%s,%.1f,%s,%s\n",
 			reading.Sensor,
 			reading.Value,
 			reading.Unit,
@@ -170,14 +170,14 @@ func (v *VerticalSpeedIndicator) outputReading(reading VSIReading) {
 		if reading.Value > 0 {
 			sign = "+"
 		}
-		fmt.Printf("%s%.0f fpm\n", sign, reading.Value)
+		fmt.Printf("%s%.1f m/s\n", sign, reading.Value)
 	}
 }
 
 func main() {
 	hz := flag.Float64("hz", 10.0, "Update frequency in Hz")
 	format := flag.String("format", "json", "Output format: json, csv, or simple")
-	noise := flag.Float64("noise", 5.0, "Noise level in fpm")
+	noise := flag.Float64("noise", 0.025, "Noise level in m/s")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
@@ -194,10 +194,10 @@ func main() {
 
 	for range ticker.C {
 		dt := vsi.updateRate.Seconds()
-		
+
 		vsi.updatePhase(vsi.updateRate)
 		vsi.updateVS(dt)
-		
+
 		reading := vsi.getReading()
 		vsi.outputReading(reading)
 	}

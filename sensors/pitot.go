@@ -44,7 +44,7 @@ type PitotTube struct {
 }
 
 func NewPitotTube(hz float64, format string, noiseLevel float64) *PitotTube {
-	groundAlt := 100.0 + rand.Float64()*400.0
+	groundAlt := 30.0 + rand.Float64()*120.0 // meters
 	return &PitotTube{
 		currentSpeed:    0.0,
 		targetSpeed:     0.0,
@@ -55,8 +55,8 @@ func NewPitotTube(hz float64, format string, noiseLevel float64) *PitotTube {
 		updateRate:      time.Duration(float64(time.Second) / hz),
 		noiseLevel:      noiseLevel,
 		format:          format,
-		maxAccel:        20.0,
-		maxDecel:        30.0,
+		maxAccel:        17.4, // kts/s
+		maxDecel:        26.0, // kts/s
 		groundAltitude:  groundAlt,
 	}
 }
@@ -66,7 +66,7 @@ func (p *PitotTube) updatePhase(elapsed time.Duration) {
 
 	switch p.phase {
 	case Taxiing:
-		p.targetSpeed = 15.0 + rand.Float64()*10.0
+		p.targetSpeed = 13.0 + rand.Float64()*9.0 // kts
 		p.targetAltitude = p.groundAltitude
 		if p.phaseTime > 20*time.Second {
 			p.phase = Takeoff
@@ -74,8 +74,8 @@ func (p *PitotTube) updatePhase(elapsed time.Duration) {
 		}
 
 	case Takeoff:
-		p.targetSpeed = 80.0
-		p.targetAltitude = p.groundAltitude + 500.0
+		p.targetSpeed = 70.0                        // kts
+		p.targetAltitude = p.groundAltitude + 150.0 // meters
 		if p.phaseTime > 15*time.Second {
 			p.phase = Climb
 			p.phaseTime = 0
@@ -83,19 +83,19 @@ func (p *PitotTube) updatePhase(elapsed time.Duration) {
 
 	case Climb:
 		progress := math.Min(1.0, float64(p.phaseTime)/float64(45*time.Second))
-		p.targetSpeed = 80.0 + progress*70.0
-		p.targetAltitude = p.groundAltitude + 500.0 + progress*4500.0
+		p.targetSpeed = 70.0 + progress*60.0                          // kts
+		p.targetAltitude = p.groundAltitude + 150.0 + progress*1370.0 // meters
 		if p.phaseTime > 45*time.Second {
 			p.phase = Cruise
 			p.phaseTime = 0
 		}
 
 	case Cruise:
-		baseSpeed := 150.0
-		variation := math.Sin(float64(p.phaseTime)/float64(30*time.Second)) * 5.0
+		baseSpeed := 130.0 // kts
+		variation := math.Sin(float64(p.phaseTime)/float64(30*time.Second)) * 4.0
 		p.targetSpeed = baseSpeed + variation
-		baseAltitude := p.groundAltitude + 5000.0
-		altVariation := math.Sin(float64(p.phaseTime)/float64(20*time.Second)) * 50.0
+		baseAltitude := p.groundAltitude + 1520.0 // meters
+		altVariation := math.Sin(float64(p.phaseTime)/float64(20*time.Second)) * 15.0
 		p.targetAltitude = baseAltitude + altVariation
 		if p.phaseTime > 90*time.Second {
 			p.phase = Descent
@@ -104,18 +104,18 @@ func (p *PitotTube) updatePhase(elapsed time.Duration) {
 
 	case Descent:
 		progress := math.Min(1.0, float64(p.phaseTime)/float64(40*time.Second))
-		p.targetSpeed = 150.0 - progress*70.0
-		startAlt := p.groundAltitude + 5000.0
-		p.targetAltitude = startAlt - progress*4500.0
+		p.targetSpeed = 130.0 - progress*60.0 // kts
+		startAlt := p.groundAltitude + 1520.0
+		p.targetAltitude = startAlt - progress*1370.0 // meters
 		if p.phaseTime > 40*time.Second {
 			p.phase = Landing
 			p.phaseTime = 0
 		}
 
 	case Landing:
-		p.targetSpeed = 15.0
+		p.targetSpeed = 13.0 // kts
 		progress := math.Min(1.0, float64(p.phaseTime)/float64(20*time.Second))
-		p.targetAltitude = p.groundAltitude + 500.0 - progress*500.0
+		p.targetAltitude = p.groundAltitude + 150.0 - progress*150.0 // meters
 		if p.phaseTime > 20*time.Second {
 			p.phase = Stopped
 			p.phaseTime = 0
@@ -151,7 +151,7 @@ func (p *PitotTube) updateState(dt float64) {
 
 	// Update altitude
 	altDiff := p.targetAltitude - p.currentAltitude
-	maxAltChange := 16.67 * dt // ~1000 fpm climb rate
+	maxAltChange := 5.08 * dt // ~1000 fpm climb rate in m/s
 	if math.Abs(altDiff) <= maxAltChange {
 		p.currentAltitude = p.targetAltitude
 	} else {
@@ -165,31 +165,32 @@ func (p *PitotTube) updateState(dt float64) {
 func (p *PitotTube) calculatePitotPressure() float64 {
 	// Standard atmospheric pressure at sea level (inHg)
 	const P0 = 29.92
-	
+
 	// Calculate static pressure based on altitude (simplified barometric formula)
+	// Convert meters to feet for standard atmosphere formula
+	altitudeFeet := p.currentAltitude * 3.28084
 	// P = P0 * (1 - 0.0000068756 * altitude)^5.2559
-	altitudeFeet := p.currentAltitude
 	staticPressure := P0 * math.Pow(1.0-0.0000068756*altitudeFeet, 5.2559)
-	
+
 	// Calculate dynamic pressure from airspeed
 	// Dynamic pressure in inHg: q = 0.00002378 * V^2 / 2
-	// This is a simplified formula for low speeds
-	speedKnots := p.currentSpeed * 0.868976 // Convert mph to knots
+	// Speed is already in knots
+	speedKnots := p.currentSpeed
 	dynamicPressure := 0.00002378 * speedKnots * speedKnots / 2.0
-	
+
 	// Total pressure = static + dynamic
 	totalPressure := staticPressure + dynamicPressure
-	
+
 	// Add sensor noise
 	noise := (rand.Float64()*2.0 - 1.0) * p.noiseLevel
 	totalPressure += noise
-	
+
 	return totalPressure
 }
 
 func (p *PitotTube) getReading() PitotReading {
 	pressure := p.calculatePitotPressure()
-	
+
 	return PitotReading{
 		Sensor:    "pitot",
 		Value:     math.Round(pressure*1000) / 1000, // Round to 3 decimals
@@ -233,10 +234,10 @@ func main() {
 
 	for range ticker.C {
 		dt := pitot.updateRate.Seconds()
-		
+
 		pitot.updatePhase(pitot.updateRate)
 		pitot.updateState(dt)
-		
+
 		reading := pitot.getReading()
 		pitot.outputReading(reading)
 	}

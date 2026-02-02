@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
 	"time"
 )
 
@@ -52,8 +51,8 @@ func NewAltimeter(hz float64, format string, noiseLevel float64) *Altimeter {
 		updateRate:      time.Duration(float64(time.Second) / hz),
 		noiseLevel:      noiseLevel,
 		format:          format,
-		maxClimbRate:    16.67,  // ~1000 fpm typical for small aircraft
-		maxDescentRate:  13.33,  // ~800 fpm
+		maxClimbRate:    16.67, // ~1000 fpm typical for small aircraft
+		maxDescentRate:  13.33, // ~800 fpm
 		groundAltitude:  groundAlt,
 	}
 }
@@ -128,7 +127,7 @@ func (a *Altimeter) updatePhase(elapsed time.Duration) {
 func (a *Altimeter) updateAltitude(dt float64) {
 	// Move toward target altitude with realistic climb/descent rates
 	diff := a.targetAltitude - a.currentAltitude
-	
+
 	var maxChange float64
 	if diff > 0 {
 		maxChange = a.maxClimbRate * dt
@@ -197,10 +196,10 @@ func main() {
 
 	for range ticker.C {
 		dt := altimeter.updateRate.Seconds()
-		
+
 		altimeter.updatePhase(altimeter.updateRate)
 		altimeter.updateAltitude(dt)
-		
+
 		reading := altimeter.getReading()
 		altimeter.outputReading(reading)
 	}
