@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -51,23 +50,23 @@ func NewASI(hz float64, format string) *AirspeedIndicator {
 func (asi *AirspeedIndicator) calculateIndicatedAirspeed() float64 {
 	// Dynamic pressure in inHg
 	dynamicPressure := asi.pitotPressure - asi.staticPressure
-	
+
 	// Ensure we don't have negative dynamic pressure
 	if dynamicPressure < 0 {
 		dynamicPressure = 0
 	}
-	
+
 	// Convert dynamic pressure to airspeed
 	// This formula converts inHg dynamic pressure to knots (IAS)
 	// V (knots) ≈ sqrt(ΔP * 77620)
 	// The constant comes from: sqrt(2 * ΔP * 703.07 / ρ₀)
 	// where ρ₀ = 0.002377 slugs/ft³ at sea level
 	speedKnots := math.Sqrt(dynamicPressure * 77620)
-	
+
 	// Convert knots to mph for consistency with other sensors
-	speedMPH := speedKnots * 1.15078
-	
-	return speedMPH
+	speedKnots := math.Sqrt(dynamicPressure * 77620)
+
+	return speedKnots
 }
 
 func (asi *AirspeedIndicator) processReading(reading PressureReading) {
@@ -81,11 +80,11 @@ func (asi *AirspeedIndicator) processReading(reading PressureReading) {
 
 func (asi *AirspeedIndicator) getReading() AirspeedReading {
 	speed := asi.calculateIndicatedAirspeed()
-	
+
 	return AirspeedReading{
 		Sensor:         "airspeed",
 		IndicatedSpeed: math.Round(speed*10) / 10,
-		Unit:           "mph",
+		Unit:           "kts",
 		PitotPressure:  asi.pitotPressure,
 		StaticPressure: asi.staticPressure,
 		Timestamp:      time.Now(),
@@ -106,7 +105,7 @@ func (asi *AirspeedIndicator) outputReading(reading AirspeedReading) {
 			reading.StaticPressure,
 			reading.Timestamp.Format(time.RFC3339))
 	case "simple":
-		fmt.Printf("%.1f mph (pitot: %.3f, static: %.3f)\n",
+		fmt.Printf("%.1f kts (pitot: %.3f, static: %.3f)\n",
 			reading.IndicatedSpeed,
 			reading.PitotPressure,
 			reading.StaticPressure)
@@ -115,24 +114,24 @@ func (asi *AirspeedIndicator) outputReading(reading AirspeedReading) {
 
 func readSensor(cmd *exec.Cmd) chan PressureReading {
 	readings := make(chan PressureReading, 100)
-	
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating pipe: %v\n", err)
 		close(readings)
 		return readings
 	}
-	
+
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting sensor: %v\n", err)
 		close(readings)
 		return readings
 	}
-	
+
 	go func() {
 		defer close(readings)
 		scanner := bufio.NewScanner(stdout)
-		
+
 		for scanner.Scan() {
 			var reading PressureReading
 			if err := json.Unmarshal(scanner.Bytes(), &reading); err != nil {
@@ -141,7 +140,7 @@ func readSensor(cmd *exec.Cmd) chan PressureReading {
 			readings <- reading
 		}
 	}()
-	
+
 	return readings
 }
 
@@ -155,19 +154,19 @@ func main() {
 	// Start pitot and static sensors
 	pitotCmd := exec.Command(*pitotPath, "-format", "json", "-hz", fmt.Sprintf("%.1f", *hz))
 	staticCmd := exec.Command(*staticPath, "-format", "json", "-hz", fmt.Sprintf("%.1f", *hz))
-	
+
 	pitotReadings := readSensor(pitotCmd)
 	staticReadings := readSensor(staticCmd)
-	
+
 	asi := NewASI(*hz, *format)
-	
+
 	if *format == "csv" {
 		fmt.Println("sensor,indicated_speed,unit,pitot_pressure,static_pressure,timestamp")
 	}
-	
+
 	ticker := time.NewTicker(asi.updateRate)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case reading, ok := <-pitotReadings:
@@ -176,14 +175,14 @@ func main() {
 				return
 			}
 			asi.processReading(reading)
-			
+
 		case reading, ok := <-staticReadings:
 			if !ok {
 				fmt.Fprintln(os.Stderr, "Static sensor stopped")
 				return
 			}
 			asi.processReading(reading)
-			
+
 		case <-ticker.C:
 			reading := asi.getReading()
 			asi.outputReading(reading)
