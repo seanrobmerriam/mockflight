@@ -23,6 +23,66 @@ type FailureConfig struct {
 	GyroSaturation        bool `json:"gyro_saturation"`
 }
 
+type Mode string
+
+const (
+	ModeFull         Mode = "full"
+	ModeTransitional Mode = "transitional"
+)
+
+type WarningState string
+
+const (
+	WarningNone          WarningState = ""
+	WarningBelowVrRotate WarningState = "below_vr_rotate"
+	WarningLowEnergy     WarningState = "low_energy"
+	WarningSinkRate      WarningState = "sink_rate"
+	WarningStall         WarningState = "stall"
+	WarningPullUp        WarningState = "pull_up"
+	WarningCrash         WarningState = "crash"
+)
+
+type AutopilotState struct {
+	Engaged           bool `json:"engaged"`
+	HeadingHold       bool `json:"heading_hold"`
+	AltitudeHold      bool `json:"altitude_hold"`
+	VerticalSpeedMode bool `json:"vertical_speed_mode"`
+}
+
+type ControlState struct {
+	Mode                  Mode           `json:"mode"`
+	Throttle              float64        `json:"throttle"`
+	TOGA                  bool           `json:"toga"`
+	RotateCommanded       bool           `json:"rotate_commanded"`
+	Airborne              bool           `json:"airborne"`
+	Warning               WarningState   `json:"warning"`
+	Crashed               bool           `json:"crashed"`
+	V1                    float64        `json:"v1"`
+	Vr                    float64        `json:"vr"`
+	V2                    float64        `json:"v2"`
+	SelectedHeading       float64        `json:"selected_heading"`
+	SelectedAltitude      float64        `json:"selected_altitude"`
+	SelectedVerticalSpeed float64        `json:"selected_vertical_speed"`
+	RunwayDistance        float64        `json:"runway_distance"`
+	RunwayRemaining       float64        `json:"runway_remaining"`
+	Autopilot             AutopilotState `json:"autopilot"`
+}
+
+type ControlCommand struct {
+	Mode                  *Mode    `json:"mode,omitempty"`
+	Throttle              *float64 `json:"throttle,omitempty"`
+	TOGA                  *bool    `json:"toga,omitempty"`
+	Rotate                *bool    `json:"rotate,omitempty"`
+	AutopilotEngaged      *bool    `json:"autopilot_engaged,omitempty"`
+	HeadingHold           *bool    `json:"heading_hold,omitempty"`
+	AltitudeHold          *bool    `json:"altitude_hold,omitempty"`
+	VerticalSpeedMode     *bool    `json:"vertical_speed_mode,omitempty"`
+	SelectedHeading       *float64 `json:"selected_heading,omitempty"`
+	SelectedAltitude      *float64 `json:"selected_altitude,omitempty"`
+	SelectedVerticalSpeed *float64 `json:"selected_vertical_speed,omitempty"`
+	Reset                 *bool    `json:"reset,omitempty"`
+}
+
 type ScalarReading struct {
 	Name  string  `json:"name"`
 	Value float64 `json:"value"`
@@ -58,6 +118,7 @@ type Snapshot struct {
 	Phase          string          `json:"phase"`
 	Timestamp      time.Time       `json:"timestamp"`
 	ActiveFailures []string        `json:"active_failures,omitempty"`
+	Controls       ControlState    `json:"controls"`
 	Altimeter      ScalarReading   `json:"altimeter"`
 	VerticalSpeed  ScalarReading   `json:"vertical_speed"`
 	StaticAir      ScalarReading   `json:"static_air"`
@@ -76,6 +137,7 @@ type Simulator struct {
 	startTime  time.Time
 	elapsed    time.Duration
 	failures   FailureConfig
+	controls   ControlState
 
 	initialized         bool
 	truth               flightState
@@ -116,10 +178,12 @@ type flightState struct {
 
 const (
 	fieldElevationFeet           = 342.0
-	cycleDuration                = 240 * time.Second
+	runwayLengthFeet             = 8200.0
 	tickInterval                 = 250 * time.Millisecond
 	vsiTimeConstant              = 6.0
 	gyroSaturationLimitDegPerSec = 1.5
+	stallSpeedKTS                = 53.0
+	runwayHeadingDeg             = 270.0
 )
 
 func NewSimulator(cfg Config) *Simulator {
@@ -177,6 +241,67 @@ func (s *Simulator) Snapshot() Snapshot {
 	return s.latestSnapshotCache
 }
 
+func (s *Simulator) Controls() ControlState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.controls
+}
+
+func (s *Simulator) ApplyControls(command ControlCommand) ControlState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if command.Reset != nil && *command.Reset {
+		s.resetLocked(s.controls.Mode)
+		return s.controls
+	}
+
+	if command.Mode != nil {
+		s.controls.Mode = *command.Mode
+	}
+	if command.Throttle != nil {
+		s.controls.Throttle = clamp(*command.Throttle, 0, 1)
+		if s.controls.Throttle < 0.995 {
+			s.controls.TOGA = false
+		}
+	}
+	if command.TOGA != nil {
+		s.controls.TOGA = *command.TOGA
+		if s.controls.TOGA {
+			s.controls.Throttle = 1
+		}
+	}
+	if command.Rotate != nil {
+		s.controls.RotateCommanded = *command.Rotate
+	}
+	if command.AutopilotEngaged != nil {
+		s.controls.Autopilot.Engaged = *command.AutopilotEngaged
+	}
+	if command.HeadingHold != nil {
+		s.controls.Autopilot.HeadingHold = *command.HeadingHold
+	}
+	if command.AltitudeHold != nil {
+		s.controls.Autopilot.AltitudeHold = *command.AltitudeHold
+	}
+	if command.VerticalSpeedMode != nil {
+		s.controls.Autopilot.VerticalSpeedMode = *command.VerticalSpeedMode
+	}
+	if command.SelectedHeading != nil {
+		s.controls.SelectedHeading = normalizeHeading(*command.SelectedHeading)
+	}
+	if command.SelectedAltitude != nil {
+		s.controls.SelectedAltitude = math.Max(fieldElevationFeet, *command.SelectedAltitude)
+	}
+	if command.SelectedVerticalSpeed != nil {
+		s.controls.SelectedVerticalSpeed = clamp(*command.SelectedVerticalSpeed, -1500, 2500)
+	}
+
+	s.controls.RunwayRemaining = math.Max(0, runwayLengthFeet-s.controls.RunwayDistance)
+	s.latestSnapshotCache = s.buildSnapshotLocked()
+	return s.controls
+}
+
 func (s *Simulator) SetFailures(failures FailureConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,27 +322,73 @@ func (s *Simulator) initializeLocked() {
 		return
 	}
 
-	s.truth = s.stateAt(0)
+	s.resetLocked(ModeFull)
+	s.initialized = true
+}
+
+func (s *Simulator) resetLocked(mode Mode) {
+	if mode == "" {
+		mode = ModeFull
+	}
+	s.elapsed = 0
+	s.controls = ControlState{
+		Mode:                  mode,
+		Throttle:              0,
+		TOGA:                  false,
+		RotateCommanded:       false,
+		Airborne:              false,
+		Warning:               WarningNone,
+		Crashed:               false,
+		V1:                    62,
+		Vr:                    67,
+		V2:                    74,
+		SelectedHeading:       runwayHeadingDeg,
+		SelectedAltitude:      fieldElevationFeet + 1800,
+		SelectedVerticalSpeed: 700,
+		RunwayDistance:        0,
+		RunwayRemaining:       runwayLengthFeet,
+		Autopilot: AutopilotState{
+			Engaged:           false,
+			HeadingHold:       false,
+			AltitudeHold:      false,
+			VerticalSpeedMode: false,
+		},
+	}
+	s.truth = flightState{
+		phase:            "runway_idle",
+		altitudeFeet:     fieldElevationFeet,
+		verticalSpeedMPS: 0,
+		airspeedKTS:      0,
+		staticPressure:   pressureAtFeet(fieldElevationFeet),
+		pitchDeg:         0,
+		rollDeg:          0,
+		headingDeg:       runwayHeadingDeg,
+	}
 	s.staticPressure = s.truth.staticPressure
-	s.pitotPressure = s.truth.pitotPressure
+	s.pitotPressure = s.truth.staticPressure
 	s.vsiChamberPressure = s.staticPressure
-	s.altimeterFeet = altitudeFromPressure(s.staticPressure)
-	s.indicatedAirspeed = indicatedAirspeedFromPressure(s.pitotPressure - s.staticPressure)
+	s.altimeterFeet = fieldElevationFeet
+	s.indicatedAirspeed = 0
 	s.verticalSpeedMPS = 0
 	s.declinationDeg = 11.0
+	s.rollEstimate = 0
+	s.pitchEstimate = 0
+	s.headingEstimate = runwayHeadingDeg
+	s.ahrsInitialized = false
 
 	for index := range s.gyroBias {
 		s.gyroBias[index] = s.noisy(0, 0.015)
 		s.magBias[index] = s.noisy(0, 0.6)
 		s.magScale[index] = 1 + s.noisy(0, 0.025)
+		s.gyroMeasured[index] = 0
+		s.accelMeasured[index] = 0
+		s.magMeasured[index] = 0
 	}
 
-	next := s.stateAt(tickInterval)
-	s.updateIMUMeasurements(s.truth, next, tickInterval.Seconds())
+	s.updateIMUMeasurements(s.truth, s.truth, tickInterval.Seconds())
 	s.updateMagnetometerMeasurement(s.truth)
 	s.updateAHRS(tickInterval.Seconds())
 	s.latestSnapshotCache = s.buildSnapshotLocked()
-	s.initialized = true
 }
 
 func (s *Simulator) advanceStepLocked(step time.Duration) {
@@ -225,28 +396,255 @@ func (s *Simulator) advanceStepLocked(step time.Duration) {
 		s.initializeLocked()
 	}
 
-	currentTruth := s.stateAt(s.elapsed)
+	currentTruth := s.truth
 	s.elapsed += step
-	nextTruth := s.stateAt(s.elapsed)
-	dt := step.Seconds()
+	s.updateControlledFlight(step.Seconds())
+	nextTruth := s.truth
 
-	s.truth = nextTruth
-	s.updatePressureMeasurements(nextTruth, dt)
-	s.updateAirspeedMeasurement(dt)
-	s.updateVSIMeasurement(dt)
-	s.updateIMUMeasurements(currentTruth, nextTruth, dt)
+	s.updatePressureMeasurements(nextTruth, step.Seconds())
+	s.updateAirspeedMeasurement(step.Seconds())
+	s.updateVSIMeasurement(step.Seconds())
+	s.updateIMUMeasurements(currentTruth, nextTruth, step.Seconds())
 	s.updateMagnetometerMeasurement(nextTruth)
-	s.updateAHRS(dt)
+	s.updateAHRS(step.Seconds())
 	s.latestSnapshotCache = s.buildSnapshotLocked()
+}
+
+func (s *Simulator) updateControlledFlight(dt float64) {
+	previous := s.truth
+	if s.controls.TOGA {
+		s.controls.Throttle = 1
+	}
+
+	if s.controls.Crashed {
+		s.truth.phase = "crash"
+		s.truth.airspeedKTS = firstOrderResponse(s.truth.airspeedKTS, 0, dt, 0.8)
+		s.truth.verticalSpeedMPS = 0
+		s.truth.pitchDeg = firstOrderResponse(s.truth.pitchDeg, 0, dt, 0.6)
+		s.truth.rollDeg = firstOrderResponse(s.truth.rollDeg, 0, dt, 0.6)
+		s.truth.altitudeFeet = fieldElevationFeet
+		s.updateRates(previous, dt)
+		return
+	}
+
+	if s.controls.Airborne {
+		s.updateAirborneState(dt)
+	} else {
+		s.updateGroundState(dt)
+	}
+
+	s.controls.Warning = s.computeWarningState()
+	if s.shouldCrashLocked() {
+		s.controls.Warning = WarningCrash
+		s.controls.Crashed = true
+		s.controls.Airborne = false
+		s.truth.phase = "crash"
+		s.truth.altitudeFeet = fieldElevationFeet
+		s.truth.verticalSpeedMPS = 0
+		s.truth.pitchDeg = 0
+		s.truth.rollDeg = 0
+	}
+
+	s.controls.RunwayRemaining = math.Max(0, runwayLengthFeet-s.controls.RunwayDistance)
+	s.truth.staticPressure = pressureAtFeet(s.truth.altitudeFeet)
+	s.truth.pitotPressure = s.truth.staticPressure + dynamicPressureAtKnots(s.truth.airspeedKTS)
+	s.updateRates(previous, dt)
+}
+
+func (s *Simulator) updateGroundState(dt float64) {
+	accel := s.groundAcceleration()
+	s.truth.airspeedKTS = math.Max(0, s.truth.airspeedKTS+accel*dt)
+	s.controls.RunwayDistance += s.truth.airspeedKTS * 1.68781 * dt
+	s.truth.headingDeg = runwayHeadingDeg
+	s.truth.rollDeg = firstOrderResponse(s.truth.rollDeg, 0, dt, 0.4)
+
+	targetPitch := 0.0
+	if s.controls.RotateCommanded {
+		targetPitch = 11.0
+	}
+	s.truth.pitchDeg = firstOrderResponse(s.truth.pitchDeg, targetPitch, dt, 0.5)
+	s.truth.verticalSpeedMPS = 0
+	s.truth.altitudeFeet = fieldElevationFeet
+
+	if s.controls.RotateCommanded && s.truth.airspeedKTS >= s.controls.Vr-1 && s.controls.Throttle >= 0.5 {
+		liftFactor := (s.truth.airspeedKTS - s.controls.Vr) / 10
+		energyBonus := s.controls.Throttle * 0.75
+		pitchBonus := s.truth.pitchDeg * 0.04
+		threshold := 0.8
+		if s.controls.Mode == ModeTransitional {
+			threshold = 0.55
+		}
+		if liftFactor+energyBonus+pitchBonus >= threshold {
+			s.controls.Airborne = true
+			s.truth.phase = "initial_climb"
+			s.truth.altitudeFeet += 5
+			s.truth.verticalSpeedMPS = 1.2
+			return
+		}
+	}
+
+	if s.controls.Throttle < 0.05 && s.truth.airspeedKTS < 1 {
+		s.truth.phase = "runway_idle"
+		return
+	}
+
+	if s.controls.RotateCommanded {
+		s.truth.phase = "rotation_attempt"
+		return
+	}
+
+	s.truth.phase = "takeoff_roll"
+}
+
+func (s *Simulator) updateAirborneState(dt float64) {
+	targetRoll := 0.0
+	if s.controls.Autopilot.Engaged && s.controls.Autopilot.HeadingHold {
+		targetRoll = clamp(angleDelta(s.truth.headingDeg, s.controls.SelectedHeading)*0.45, -18, 18)
+	}
+	s.truth.rollDeg = firstOrderResponse(s.truth.rollDeg, targetRoll, dt, 1.2)
+
+	turnRate := s.truth.rollDeg * 0.12
+	if s.controls.Mode == ModeTransitional {
+		turnRate *= 0.9
+	}
+	s.truth.headingDeg = normalizeHeading(s.truth.headingDeg + turnRate*dt)
+
+	desiredVS := s.commandedVerticalSpeedMPS()
+	if s.controls.Mode == ModeTransitional && s.controls.Throttle >= 0.7 && desiredVS < 2.5 {
+		desiredVS = 2.5
+	}
+
+	energyMargin := s.controls.Throttle*92 - s.truth.airspeedKTS - math.Max(0, desiredVS*8) - math.Max(0, s.truth.pitchDeg*1.8)
+	airspeedAccel := energyMargin*0.03 - 0.35
+	if s.controls.Mode == ModeTransitional {
+		airspeedAccel += 0.35
+	}
+	s.truth.airspeedKTS = math.Max(0, s.truth.airspeedKTS+airspeedAccel*dt)
+
+	if s.truth.airspeedKTS < stallSpeedKTS {
+		desiredVS = math.Min(desiredVS, -2.8)
+	}
+
+	s.truth.verticalSpeedMPS = firstOrderResponse(s.truth.verticalSpeedMPS, desiredVS, dt, 1.4)
+	s.truth.altitudeFeet += s.truth.verticalSpeedMPS * dt * 3.28084
+
+	targetPitch := clamp(2.0+s.truth.verticalSpeedMPS*1.7, -4, 16)
+	if !s.controls.Autopilot.Engaged && s.controls.RotateCommanded {
+		targetPitch = math.Max(targetPitch, 10)
+	}
+	s.truth.pitchDeg = firstOrderResponse(s.truth.pitchDeg, targetPitch, dt, 1.1)
+
+	if s.truth.altitudeFeet <= fieldElevationFeet {
+		s.truth.altitudeFeet = fieldElevationFeet
+	}
+
+	if s.truth.altitudeFeet-fieldElevationFeet < 1500 {
+		s.truth.phase = "initial_climb"
+	} else {
+		s.truth.phase = "airborne"
+	}
+}
+
+func (s *Simulator) groundAcceleration() float64 {
+	base := s.controls.Throttle*7.4 - 0.7 - s.truth.airspeedKTS*0.045
+	if s.controls.TOGA {
+		base += 0.4
+	}
+	if s.controls.Throttle < 0.05 && s.truth.airspeedKTS < 0.5 {
+		return -s.truth.airspeedKTS * 3
+	}
+	if base < -2 {
+		return -2
+	}
+	return base
+}
+
+func (s *Simulator) commandedVerticalSpeedMPS() float64 {
+	if s.controls.Autopilot.Engaged {
+		if s.controls.Autopilot.AltitudeHold {
+			altitudeError := s.controls.SelectedAltitude - s.truth.altitudeFeet
+			target := clamp(altitudeError*0.01, -4.5, 5.2)
+			if math.Abs(altitudeError) < 25 {
+				return 0
+			}
+			return target
+		}
+		if s.controls.Autopilot.VerticalSpeedMode {
+			return clamp(s.controls.SelectedVerticalSpeed*0.00508, -5.5, 7.5)
+		}
+	}
+
+	if s.controls.RotateCommanded || s.controls.TOGA {
+		return clamp((s.truth.airspeedKTS-s.controls.V2)*0.08+4.6, -4.0, 7.8)
+	}
+
+	return clamp((s.truth.airspeedKTS-s.controls.V1)*0.02, -1.0, 1.5)
+}
+
+func (s *Simulator) computeWarningState() WarningState {
+	if s.controls.Crashed {
+		return WarningCrash
+	}
+
+	agl := s.truth.altitudeFeet - fieldElevationFeet
+	if s.controls.Airborne {
+		if agl < 120 && s.truth.verticalSpeedMPS < -4.0 {
+			return WarningPullUp
+		}
+		if agl < 500 && s.truth.verticalSpeedMPS < -2.5 {
+			return WarningSinkRate
+		}
+		if s.truth.airspeedKTS < stallSpeedKTS || (s.truth.pitchDeg > 14 && s.truth.airspeedKTS < s.controls.V2-10) {
+			return WarningStall
+		}
+		if s.truth.airspeedKTS < s.controls.V2-8 && s.truth.pitchDeg > 8 {
+			return WarningLowEnergy
+		}
+		return WarningNone
+	}
+
+	if s.controls.RotateCommanded && s.truth.airspeedKTS < s.controls.Vr {
+		return WarningBelowVrRotate
+	}
+	if s.controls.Throttle > 0.7 && s.controls.RunwayDistance > runwayLengthFeet*0.65 && s.truth.airspeedKTS < s.controls.Vr-8 {
+		return WarningLowEnergy
+	}
+	return WarningNone
+}
+
+func (s *Simulator) shouldCrashLocked() bool {
+	if s.controls.RunwayDistance >= runwayLengthFeet && !s.controls.Airborne {
+		return true
+	}
+	if !s.controls.Airborne {
+		return false
+	}
+	agl := s.truth.altitudeFeet - fieldElevationFeet
+	if agl <= 0 && (s.truth.verticalSpeedMPS < -0.8 || s.controls.Warning == WarningPullUp || s.controls.Warning == WarningStall) {
+		return true
+	}
+	return false
+}
+
+func (s *Simulator) updateRates(previous flightState, dt float64) {
+	if dt <= 0 {
+		return
+	}
+	s.truth.rollRateDegPerSec = angleDelta(previous.rollDeg, s.truth.rollDeg) / dt
+	s.truth.pitchRateDegPerSec = angleDelta(previous.pitchDeg, s.truth.pitchDeg) / dt
+	s.truth.yawRateDegPerSec = angleDelta(previous.headingDeg, s.truth.headingDeg) / dt
 }
 
 func (s *Simulator) buildSnapshotLocked() Snapshot {
 	timestamp := s.startTime.Add(s.elapsed)
+	controls := s.controls
+	controls.RunwayRemaining = math.Max(0, runwayLengthFeet-controls.RunwayDistance)
 
 	return Snapshot{
 		Phase:          s.truth.phase,
 		Timestamp:      timestamp,
 		ActiveFailures: s.activeFailures(),
+		Controls:       controls,
 		Altimeter:      ScalarReading{Name: "altimeter", Value: s.round(s.altimeterFeet, 0.1), Unit: "ft"},
 		VerticalSpeed:  ScalarReading{Name: "vertical_speed", Value: s.round(s.verticalSpeedMPS, 0.01), Unit: "m/s"},
 		StaticAir:      ScalarReading{Name: "static_air", Value: s.round(s.staticPressure, 0.001), Unit: "inHg"},
@@ -300,10 +698,10 @@ func (s *Simulator) updatePressureMeasurements(truth flightState, dt float64) {
 	pitotTarget := truth.staticPressure + q + q*0.01*math.Sin(pitchRad) + s.noisy(0, 0.0015)
 	if s.failures.StaticLeak {
 		leakReference := pressureAtFeet(fieldElevationFeet)
-		staticTarget += 0.18 * (leakReference - staticTarget)
+		staticTarget += 0.78 * (leakReference - staticTarget)
 	}
 	if s.failures.PitotDrainBlocked {
-		pitotTarget = truth.staticPressure + q*0.12 + s.noisy(0, 0.001)
+		pitotTarget = truth.staticPressure + s.noisy(0, 0.001)
 	}
 
 	if !s.failures.StaticPortBlocked {
@@ -427,104 +825,8 @@ func (s *Simulator) updateAHRS(dt float64) {
 	s.headingEstimate = normalizeHeading(gyroHeading + (1-alpha)*angleDelta(gyroHeading, magHeading))
 }
 
-func (s *Simulator) stateAt(elapsed time.Duration) flightState {
-	seconds := math.Mod(elapsed.Seconds(), cycleDuration.Seconds())
-	base := s.baseState(seconds)
-	derived := s.baseState(math.Mod(seconds+0.2, cycleDuration.Seconds()))
-
-	base.rollRateDegPerSec = angleDelta(base.rollDeg, derived.rollDeg) / 0.2
-	base.pitchRateDegPerSec = angleDelta(base.pitchDeg, derived.pitchDeg) / 0.2
-	base.yawRateDegPerSec = angleDelta(base.headingDeg, derived.headingDeg) / 0.2
-	base.staticPressure = pressureAtFeet(base.altitudeFeet)
-	base.pitotPressure = base.staticPressure + dynamicPressureAtKnots(base.airspeedKTS)
-
-	return base
-}
-
-func (s *Simulator) baseState(seconds float64) flightState {
-	switch {
-	case seconds < 20:
-		progress := seconds / 20
-		return flightState{
-			phase:            "ground",
-			altitudeFeet:     fieldElevationFeet,
-			verticalSpeedMPS: 0,
-			airspeedKTS:      5 + progress*15,
-			pitchDeg:         0.2 * math.Sin(progress*math.Pi),
-			rollDeg:          0.5 * math.Sin(progress*2*math.Pi),
-			headingDeg:       268,
-		}
-	case seconds < 35:
-		progress := (seconds - 20) / 15
-		return flightState{
-			phase:            "takeoff",
-			altitudeFeet:     fieldElevationFeet + progress*500,
-			verticalSpeedMPS: 5.1,
-			airspeedKTS:      20 + progress*55,
-			pitchDeg:         2 + progress*10,
-			rollDeg:          1.2 * math.Sin(progress*math.Pi),
-			headingDeg:       270,
-		}
-	case seconds < 80:
-		progress := (seconds - 35) / 45
-		return flightState{
-			phase:            "climb",
-			altitudeFeet:     fieldElevationFeet + 500 + progress*4500,
-			verticalSpeedMPS: 5.0 + 0.35*math.Sin(progress*4*math.Pi),
-			airspeedKTS:      78 + progress*47,
-			pitchDeg:         8.5 + 1.2*math.Sin(progress*3*math.Pi),
-			rollDeg:          2.5 * math.Sin(progress*2*math.Pi),
-			headingDeg:       normalizeHeading(270 + 4*math.Sin(progress*2*math.Pi)),
-		}
-	case seconds < 170:
-		progress := (seconds - 80) / 90
-		return flightState{
-			phase:            "cruise",
-			altitudeFeet:     fieldElevationFeet + 5000 + 40*math.Sin(progress*6*math.Pi),
-			verticalSpeedMPS: 0.15 * math.Sin(progress*6*math.Pi),
-			airspeedKTS:      126 + 4*math.Sin(progress*4*math.Pi),
-			pitchDeg:         2.5 + 0.7*math.Sin(progress*4*math.Pi),
-			rollDeg:          12 * math.Sin(progress*2*math.Pi),
-			headingDeg:       normalizeHeading(270 + 40*math.Sin(progress*2*math.Pi)),
-		}
-	case seconds < 210:
-		progress := (seconds - 170) / 40
-		return flightState{
-			phase:            "descent",
-			altitudeFeet:     fieldElevationFeet + 5000 - progress*4300,
-			verticalSpeedMPS: -4.0 + 0.25*math.Sin(progress*4*math.Pi),
-			airspeedKTS:      120 - progress*45,
-			pitchDeg:         -1.5 + 0.5*math.Sin(progress*3*math.Pi),
-			rollDeg:          4 * math.Sin(progress*2*math.Pi),
-			headingDeg:       normalizeHeading(252 + 15*math.Sin(progress*math.Pi)),
-		}
-	case seconds < 230:
-		progress := (seconds - 210) / 20
-		pitch := -2.0
-		if progress > 0.75 {
-			pitch = -2 + ((progress-0.75)/0.25)*6
-		}
-		return flightState{
-			phase:            "landing",
-			altitudeFeet:     fieldElevationFeet + 700 - progress*700,
-			verticalSpeedMPS: -2.3 + progress*2.1,
-			airspeedKTS:      75 - progress*50,
-			pitchDeg:         pitch,
-			rollDeg:          3 * math.Sin(progress*4*math.Pi),
-			headingDeg:       270,
-		}
-	default:
-		progress := (seconds - 230) / 10
-		return flightState{
-			phase:            "ground_rollout",
-			altitudeFeet:     fieldElevationFeet,
-			verticalSpeedMPS: 0,
-			airspeedKTS:      22 - progress*20,
-			pitchDeg:         0.4 * (1 - progress),
-			rollDeg:          0.6 * math.Sin(progress*2*math.Pi),
-			headingDeg:       270,
-		}
-	}
+func (s *Simulator) stateAt(_ time.Duration) flightState {
+	return s.truth
 }
 
 func (s *Simulator) accelerometer(current flightState, next flightState, dt float64) (float64, float64, float64) {

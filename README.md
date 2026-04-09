@@ -44,7 +44,14 @@ go run . -pitot-blocked -static-leak
 
 ## Dashboard
 
-The root page renders a live instrument deck backed by the shared simulator state. The UI polls the snapshot API and exposes failure toggles, so altitude, airspeed, pitch, roll, heading, pitot-static pressure, and AHRS values all move together and react to injected faults as one flight profile.
+The root page renders a live IFR trainer deck backed by the shared simulator state. The UI polls the snapshot API and exposes:
+
+- runway-start controls for throttle, TO/GA, rotate, reset, and basic autopilot targets
+- failure injection controls for pitot-static and heading-reference degradations
+- scenario launchers and emergency checklist selection for phase-1 single-engine IFR training
+- repeating aural warnings for `SINK RATE` and `PULL UP`, with a browser-side `Aural Alerts` mute toggle
+
+Altitude, airspeed, pitch, roll, heading, pitot-static pressure, AHRS values, and takeoff warning state all move together and react to injected faults as one flight profile.
 
 ## HTTP API
 
@@ -56,9 +63,32 @@ Example response:
 
 ```json
 {
-  "phase": "cruise",
+  "phase": "initial_climb",
   "timestamp": "2026-04-06T12:00:00Z",
   "active_failures": ["pitot_blocked"],
+  "controls": {
+    "mode": "full",
+    "throttle": 1,
+    "toga": true,
+    "rotate_commanded": true,
+    "airborne": true,
+    "warning": "",
+    "crashed": false,
+    "v1": 62,
+    "vr": 67,
+    "v2": 74,
+    "selected_heading": 270,
+    "selected_altitude": 2142,
+    "selected_vertical_speed": 700,
+    "runway_distance": 1650,
+    "runway_remaining": 6550,
+    "autopilot": {
+      "engaged": false,
+      "heading_hold": false,
+      "altitude_hold": false,
+      "vertical_speed_mode": false
+    }
+  },
   "altimeter": {"name": "altimeter", "value": 5342, "unit": "ft"},
   "vertical_speed": {"name": "vertical_speed", "value": 0.08, "unit": "m/s"},
   "static_air": {"name": "static_air", "value": 24.387, "unit": "inHg"},
@@ -101,6 +131,57 @@ Supported fields:
 - `static_leak`
 - `magnetometer_disturbed`
 - `gyro_saturation`
+
+### `GET /api/controls`
+
+Returns the current simulator control and autopilot state.
+
+### `POST /api/controls`
+
+Updates control state at runtime.
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8080/api/controls \
+  -H 'Content-Type: application/json' \
+  -d '{"throttle":0.85,"rotate":true,"heading_hold":true,"selected_heading":315}'
+```
+
+Common fields:
+
+- `mode`
+- `throttle`
+- `toga`
+- `rotate`
+- `autopilot_engaged`
+- `heading_hold`
+- `altitude_hold`
+- `vertical_speed_mode`
+- `selected_heading`
+- `selected_altitude`
+- `selected_vertical_speed`
+- `reset`
+
+### `POST /api/scenarios`
+
+Applies a training scenario from the phase-1 IFR catalog.
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8080/api/scenarios \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"lowEnergyClimb"}'
+```
+
+Use an empty key to return to manual mode:
+
+```bash
+curl -X POST http://localhost:8080/api/scenarios \
+  -H 'Content-Type: application/json' \
+  -d '{"key":""}'
+```
 
 ### `GET /healthz`
 
