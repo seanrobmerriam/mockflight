@@ -169,6 +169,20 @@ Unsafe takeoff handling should escalate by condition rather than by script:
 
 If the user rotates early and does not achieve enough lift or climb performance, the simulator should deteriorate through these states according to energy and terrain conditions. A crash state should be explicit, terminal for the current run, and require a reset action.
 
+### Aural Warning Behavior
+
+The dashboard should add repeating aural callouts for the existing `sink_rate` and `pull_up` warning states.
+
+- `sink_rate` should play a repeating “SINK RATE” callout while that warning remains active
+- `pull_up` should play a repeating “PULL UP” callout while that warning remains active
+- `pull_up` should repeat at a faster cadence than `sink_rate`
+- warning audio should stop immediately when the active warning changes, clears, or the simulator resets
+- only one warning callout should play at a time
+
+This should remain a frontend-only behavior in the current pass. The browser should observe the existing warning state from the snapshot or control display model and drive audio locally without adding backend audio endpoints or simulator-side sound logic.
+
+Because browser audio playback is gesture-gated, the page should unlock audio on the first user interaction and degrade gracefully until that interaction occurs.
+
 ### Autopilot Scope
 
 The initial autopilot scope should remain intentionally basic:
@@ -260,6 +274,7 @@ The frontend should add a display-model translation layer between raw snapshot d
 - takeoff control state
 - V-speed markers and warning states
 - autopilot active mode and selected targets
+- active aural alert state
 
 Even if the page remains embedded in a single template, the JavaScript should be partitioned into focused rendering units:
 
@@ -273,6 +288,7 @@ Even if the page remains embedded in a single template, the JavaScript should be
 - checklist drawer rendering
 - takeoff control rendering
 - autopilot control rendering
+- aural alert controller
 
 This separation is necessary to keep the single page maintainable once synthetic navigation and degraded-mode behavior are introduced.
 
