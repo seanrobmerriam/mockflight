@@ -10,6 +10,7 @@ const (
 	FidelityFullySimulated ScenarioFidelity     = "fully_simulated"
 	AdvanceUntilVr         ScenarioAdvanceUntil = "vr"
 	AdvanceUntilAirborne   ScenarioAdvanceUntil = "airborne"
+	AdvanceUntilAltitude   ScenarioAdvanceUntil = "altitude"
 )
 
 type TrainingScenarioSetup struct {
@@ -24,18 +25,26 @@ type TrainingScenarioSimulatorSetup struct {
 
 type TrainingScenarioSimulatorStep struct {
 	Controls TrainingScenarioControls `json:"controls"`
-	Advance  TrainingScenarioAdvance  `json:"advance,omitempty"`
+	Failures *sim.FailureConfig      `json:"failures,omitempty"`
+	Advance  TrainingScenarioAdvance `json:"advance,omitempty"`
 }
 
 type TrainingScenarioControls struct {
-	Throttle float64 `json:"throttle,omitempty"`
-	TOGA     bool    `json:"toga,omitempty"`
-	Rotate   bool    `json:"rotate,omitempty"`
+	Throttle              float64 `json:"throttle,omitempty"`
+	TOGA                  bool    `json:"toga,omitempty"`
+	Rotate                bool    `json:"rotate,omitempty"`
+	ReleaseRotate         bool    `json:"release_rotate,omitempty"`
+	AutopilotEngaged      bool    `json:"autopilot_engaged,omitempty"`
+	AltitudeHold          bool    `json:"altitude_hold,omitempty"`
+	SelectedAltitude      float64 `json:"selected_altitude,omitempty"`
+	VerticalSpeedMode     bool    `json:"vertical_speed_mode,omitempty"`
+	SelectedVerticalSpeed float64 `json:"selected_vertical_speed,omitempty"`
 }
 
 type TrainingScenarioAdvance struct {
-	Milliseconds int                  `json:"milliseconds,omitempty"`
-	Until        ScenarioAdvanceUntil `json:"until,omitempty"`
+	Milliseconds   int                  `json:"milliseconds,omitempty"`
+	Until          ScenarioAdvanceUntil `json:"until,omitempty"`
+	TargetAltitude float64              `json:"target_altitude,omitempty"`
 }
 
 type TrainingScenario struct {
@@ -63,6 +72,135 @@ type TrainingChecklist struct {
 }
 
 var trainingScenarios = map[string]TrainingScenario{
+	"normalTakeoff": {
+		Key:           "normalTakeoff",
+		Title:         "Normal Takeoff",
+		Category:      "Normal Procedures",
+		TrainingPhase: "Takeoff Roll",
+		Weather:       "VMC, calm winds",
+		Trigger:       "Standard takeoff roll, rotation, and liftoff with no system failures.",
+		InitialCues: []string{
+			"Airspeed builds normally through V1 and Vr.",
+			"All sensor indications remain consistent with pitch, power, and runway track.",
+		},
+		Progression: []string{
+			"Rotation at Vr produces a normal initial climb.",
+			"No abnormal indication develops to require a checklist.",
+		},
+		NavSource:        "RWY HDG",
+		ApproachState:    "Takeoff",
+		Failures:         sim.FailureConfig{},
+		ChecklistOptions: []string{"Normal Operations", "Low Energy Takeoff", "Rejected Takeoff"},
+		CorrectChecklist: "Normal Operations",
+		Fidelity:         FidelityFullySimulated,
+		Description:      "Fly a standard takeoff and rotation with normal energy and no system failures; confirm nothing warrants an abnormal checklist.",
+		Setup: TrainingScenarioSetup{
+			Failures: sim.FailureConfig{},
+			Simulator: &TrainingScenarioSimulatorSetup{
+				Mode: sim.ModeFull,
+				Steps: []TrainingScenarioSimulatorStep{
+					{
+						Controls: TrainingScenarioControls{Throttle: 0.95},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilVr, Milliseconds: 20000},
+					},
+					{
+						Controls: TrainingScenarioControls{Rotate: true},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilAirborne, Milliseconds: 6000},
+					},
+				},
+			},
+		},
+	},
+	"normalClimb": {
+		Key:           "normalClimb",
+		Title:         "Normal Climb",
+		Category:      "Normal Procedures",
+		TrainingPhase: "Climb",
+		Weather:       "VMC, smooth air",
+		Trigger:       "Standard climb to an assigned altitude with the autopilot managing the profile.",
+		InitialCues: []string{
+			"Autopilot altitude hold tracks the selected altitude smoothly.",
+			"All sensor indications remain consistent through the climb.",
+		},
+		Progression: []string{
+			"The aircraft levels at the selected altitude with no abnormal indications.",
+			"No checklist is required; continue normal cruise flow.",
+		},
+		NavSource:        "DEP / HDG",
+		ApproachState:    "Climb",
+		Failures:         sim.FailureConfig{},
+		ChecklistOptions: []string{"Normal Operations", "Airspeed Unreliable", "Low Energy Takeoff"},
+		CorrectChecklist: "Normal Operations",
+		Fidelity:         FidelityFullySimulated,
+		Description:      "Fly a standard climb to an assigned altitude under autopilot altitude hold with no system failures.",
+		Setup: TrainingScenarioSetup{
+			Failures: sim.FailureConfig{},
+			Simulator: &TrainingScenarioSimulatorSetup{
+				Mode: sim.ModeFull,
+				Steps: []TrainingScenarioSimulatorStep{
+					{
+						Controls: TrainingScenarioControls{Throttle: 1.0},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilVr, Milliseconds: 20000},
+					},
+					{
+						Controls: TrainingScenarioControls{Rotate: true},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilAirborne, Milliseconds: 6000},
+					},
+					{
+						Controls: TrainingScenarioControls{ReleaseRotate: true, AutopilotEngaged: true, VerticalSpeedMode: true, SelectedVerticalSpeed: 300},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilAltitude, TargetAltitude: 5000, Milliseconds: 950000},
+					},
+				},
+			},
+		},
+	},
+	"pitotIcingCruise": {
+		Key:           "pitotIcingCruise",
+		Title:         "Pitot Icing / Unreliable Airspeed At FL300",
+		Category:      "Pitot-Static",
+		TrainingPhase: "Cruise",
+		Weather:       "Cruise in icing conditions at FL300",
+		Trigger:       "Pitot heat fails to prevent ice accretion once established in cruise at 30,000 ft, and indicated airspeed becomes unreliable.",
+		InitialCues: []string{
+			"Climb to FL300 and level-off are normal under autopilot altitude hold.",
+			"Once established in cruise, indicated airspeed stops behaving credibly as pitch and power remain stable.",
+		},
+		Progression: []string{
+			"Chasing the indicated airspeed destabilizes the cruise profile.",
+			"Known pitch-power settings and cross-check of altitude and attitude keep the aircraft controllable.",
+		},
+		NavSource:        "GPS DIRECT",
+		ApproachState:    "Cruise",
+		Failures:         sim.FailureConfig{},
+		ChecklistOptions: []string{"Airspeed Unreliable", "Static System Unreliable", "Partial Panel Attitude Recovery"},
+		CorrectChecklist: "Airspeed Unreliable",
+		Fidelity:         FidelityFullySimulated,
+		Description:      "Climb to FL300, establish cruise, and diagnose a pitot icing event that renders indicated airspeed unreliable.",
+		Setup: TrainingScenarioSetup{
+			Failures: sim.FailureConfig{},
+			Simulator: &TrainingScenarioSimulatorSetup{
+				Mode: sim.ModeFull,
+				Steps: []TrainingScenarioSimulatorStep{
+					{
+						Controls: TrainingScenarioControls{Throttle: 1.0},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilVr, Milliseconds: 20000},
+					},
+					{
+						Controls: TrainingScenarioControls{Rotate: true},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilAirborne, Milliseconds: 6000},
+					},
+					{
+						Controls: TrainingScenarioControls{ReleaseRotate: true, AutopilotEngaged: true, VerticalSpeedMode: true, SelectedVerticalSpeed: 300},
+						Advance:  TrainingScenarioAdvance{Until: AdvanceUntilAltitude, TargetAltitude: 30000, Milliseconds: 6200000},
+					},
+					{
+						Failures: &sim.FailureConfig{PitotBlocked: true},
+						Advance:  TrainingScenarioAdvance{Milliseconds: 5000},
+					},
+				},
+			},
+		},
+	},
 	"pitotDeparture": {
 		Key:           "pitotDeparture",
 		Title:         "Pitot Blockage In Climb",
@@ -298,6 +436,15 @@ var trainingScenarios = map[string]TrainingScenario{
 }
 
 var trainingChecklists = map[string]TrainingChecklist{
+	"Normal Operations": {
+		Title: "Normal Operations",
+		Items: []string{
+			"INSTRUMENTS ........................ CROSS-CHECKED, NO DISCREPANCIES",
+			"FLIGHT PATH ......................... CONTINUE AS BRIEFED",
+			"ABNORMAL PROCEDURES ................. NOT REQUIRED",
+			"MONITORING .......................... MAINTAIN NORMAL SCAN",
+		},
+	},
 	"Airspeed Unreliable": {
 		Title: "Airspeed Unreliable",
 		Items: []string{
