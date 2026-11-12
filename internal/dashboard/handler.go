@@ -177,7 +177,7 @@ func applyTrainingScenario(provider SnapshotProvider, key string) (int, string) 
 	failures.SetFailures(scenario.Setup.Failures)
 
 	if scenario.Setup.Simulator != nil {
-		if err := applyScenarioSimulatorSetup(provider, controls, progress, scenario.Setup.Simulator); err != nil {
+		if err := applyScenarioSimulatorSetup(provider, controls, failures, progress, scenario.Setup.Simulator); err != nil {
 			return http.StatusConflict, err.Error()
 		}
 	}
@@ -185,13 +185,17 @@ func applyTrainingScenario(provider SnapshotProvider, key string) (int, string) 
 	return 0, ""
 }
 
-func applyScenarioSimulatorSetup(provider SnapshotProvider, controls ControlProvider, progress ScenarioProgressProvider, setup *TrainingScenarioSimulatorSetup) error {
+func applyScenarioSimulatorSetup(provider SnapshotProvider, controls ControlProvider, failures FailureProvider, progress ScenarioProgressProvider, setup *TrainingScenarioSimulatorSetup) error {
 	mode := setup.Mode
 	controls.ApplyControls(sim.ControlCommand{Mode: &mode})
 	reset := true
 	controls.ApplyControls(sim.ControlCommand{Reset: &reset})
 
 	for _, step := range setup.Steps {
+		if step.Failures != nil {
+			failures.SetFailures(*step.Failures)
+		}
+
 		command := sim.ControlCommand{}
 		hasCommand := false
 		if step.Controls.Throttle > 0 {
@@ -207,6 +211,36 @@ func applyScenarioSimulatorSetup(provider SnapshotProvider, controls ControlProv
 		if step.Controls.Rotate {
 			rotate := true
 			command.Rotate = &rotate
+			hasCommand = true
+		}
+		if step.Controls.ReleaseRotate {
+			rotate := false
+			command.Rotate = &rotate
+			hasCommand = true
+		}
+		if step.Controls.AutopilotEngaged {
+			engaged := true
+			command.AutopilotEngaged = &engaged
+			hasCommand = true
+		}
+		if step.Controls.AltitudeHold {
+			altitudeHold := true
+			command.AltitudeHold = &altitudeHold
+			hasCommand = true
+		}
+		if step.Controls.SelectedAltitude > 0 {
+			selectedAltitude := step.Controls.SelectedAltitude
+			command.SelectedAltitude = &selectedAltitude
+			hasCommand = true
+		}
+		if step.Controls.VerticalSpeedMode {
+			verticalSpeedMode := true
+			command.VerticalSpeedMode = &verticalSpeedMode
+			hasCommand = true
+		}
+		if step.Controls.SelectedVerticalSpeed != 0 {
+			selectedVerticalSpeed := step.Controls.SelectedVerticalSpeed
+			command.SelectedVerticalSpeed = &selectedVerticalSpeed
 			hasCommand = true
 		}
 		if hasCommand {
@@ -235,7 +269,7 @@ func advanceScenarioStep(provider SnapshotProvider, progress ScenarioProgressPro
 	}
 
 	for elapsed := time.Duration(0); elapsed <= budget; {
-		if scenarioAdvanceSatisfied(provider.Snapshot(), advance.Until) {
+		if scenarioAdvanceSatisfied(provider.Snapshot(), advance) {
 			return
 		}
 
@@ -252,12 +286,14 @@ func advanceScenarioStep(provider SnapshotProvider, progress ScenarioProgressPro
 	}
 }
 
-func scenarioAdvanceSatisfied(snapshot sim.Snapshot, until ScenarioAdvanceUntil) bool {
-	switch until {
+func scenarioAdvanceSatisfied(snapshot sim.Snapshot, advance TrainingScenarioAdvance) bool {
+	switch advance.Until {
 	case AdvanceUntilVr:
 		return snapshot.Airspeed.Indicated >= snapshot.Controls.Vr
 	case AdvanceUntilAirborne:
 		return snapshot.Controls.Airborne
+	case AdvanceUntilAltitude:
+		return snapshot.Altimeter.Value >= advance.TargetAltitude
 	default:
 		return true
 	}
